@@ -22,3 +22,6 @@ optional arguments:
   -u URL, --url URL     url to find technologies
   -f FILE, --file FILE  list of urls to find web technologies
 ```
+
+# Demo 
+![wappy](https://user-images.githubusercontent.com/57899332/141133098-906e9ac0-b85e-453d-9e16-f48b4c14303c.gif)

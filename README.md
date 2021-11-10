@@ -9,7 +9,7 @@ Wappalyzer CLI tool to find Web Technologies
 
 > pip3 install -r requirements.txt
 
-`
+```
 root@kali:~/tools/wappalyzer-cli# python3 wappy.py -h
 usage: wappy.py [-h] [-u URL] [-f FILE]
 
@@ -20,4 +20,4 @@ optional arguments:
   -u URL, --url URL     url to find technologies
   -f FILE, --file FILE  list of urls to find web technologies
 
-`
+```

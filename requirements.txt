@@ -1,0 +1,4 @@
+colorama
+requests
+argparse
+python-Wappalyzer

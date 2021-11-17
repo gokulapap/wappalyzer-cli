@@ -7,7 +7,7 @@ Wappalyzer CLI tool to find Web Technologies
 
 > cd wappalyzer-cli
 
-> pip3 install -r requirements.txt
+> pip3 install .
 
 
 ```

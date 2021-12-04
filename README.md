@@ -21,6 +21,8 @@ optional arguments:
   -h, --help            show this help message and exit
   -u URL, --url URL     url to find technologies
   -f FILE, --file FILE  list of urls to find web technologies
+  -wf WRITEFILE, --writefile WRITEFILE  File to write output to
+
 ```
 
 # Demo 

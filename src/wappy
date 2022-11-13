@@ -20,7 +20,11 @@ def find_techs(url, nl):
      j = None
    if '.' in url and 'http' not in url:
      t = 'http://'+url
-     url = requests.head(t, allow_redirects=True).url
+     try:
+        url = requests.head(t, allow_redirects=True).url
+     except:
+        print("[+] Some error occurred while resolving")
+        return
 
    try:
      webpage = WebPage.new_from_url(url)

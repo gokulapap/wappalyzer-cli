@@ -7,6 +7,10 @@ Wappalyzer CLI tool to find Web Technologies
 
 > cd wappalyzer-cli
 
+> python3 -m venv venv
+
+> source venv/bin/activate
+
 > pip3 install .
 
 

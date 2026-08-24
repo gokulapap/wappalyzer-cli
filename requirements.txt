@@ -1,5 +1,0 @@
-colorama
-requests
-argparse
-python-Wappalyzer
-setuptools

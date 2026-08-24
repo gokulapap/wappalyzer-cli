@@ -1,0 +1,58 @@
+version: 2
+
+project_name: wappy
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: wappy
+    main: ./cmd/wappy
+    binary: wappy
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - >-
+        -s -w
+        -X github.com/gokulapap/wappalyzer-cli/internal/buildinfo.Version={{.Version}}
+        -X github.com/gokulapap/wappalyzer-cli/internal/buildinfo.Commit={{.Commit}}
+        -X github.com/gokulapap/wappalyzer-cli/internal/buildinfo.Date={{.Date}}
+    goos:
+      - darwin
+      - freebsd
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: release
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+release:
+  draft: false
+  prerelease: auto

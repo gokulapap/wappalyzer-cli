@@ -21,9 +21,11 @@ func TestWriteFormats(t *testing.T) {
 		Technologies: []scanner.Technology{{
 			Name:       "Nginx",
 			Version:    "1.25",
+			Confidence: 100,
 			Categories: []string{"Web servers"},
 		}},
-		DurationMS: 12,
+		PagesScanned: 1,
+		DurationMS:   12,
 	}}
 
 	t.Run("text", func(t *testing.T) {

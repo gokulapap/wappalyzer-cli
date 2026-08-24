@@ -47,6 +47,13 @@ type options struct {
 	Quiet           bool
 	Color           string
 	FailOnError     bool
+	Deep            bool
+	CrawlPages      int
+	FetchAssets     bool
+	MaxAssets       int
+	AssetScope      string
+	MinConfidence   int
+	Explain         bool
 }
 
 type streams struct {
@@ -87,13 +94,12 @@ func newRootCommand(ioStreams streams) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "wappy [flags] [target ...]",
 		Short: "Fast web technology fingerprinting",
-		Long: "wappy fingerprints web technologies from HTTP response headers, cookies, and HTML.\n" +
+		Long: "wappy fingerprints web technologies from HTTP responses, parsed DOM, CSS, and JavaScript.\n" +
 			"Targets may be URLs, hostnames, positional arguments, files, or stdin.",
-		Example: strings.TrimSpace(`
-  wappy example.com
-  wappy -u https://app.example.com -u api.example.com
-  wappy -f targets.txt --format jsonl -o results.jsonl
-  subfinder -silent -d example.com | wappy --stdin -q`),
+		Example: "  wappy example.com\n" +
+			"  wappy -u https://app.example.com -u api.example.com\n" +
+			"  wappy -f targets.txt --format jsonl -o results.jsonl\n" +
+			"  subfinder -silent -d example.com | wappy --stdin -q",
 		Args:          cobra.ArbitraryArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -133,6 +139,15 @@ func newRootCommand(ioStreams streams) *cobra.Command {
 
 	flags.StringVar(&opts.FingerprintFile, "fingerprints", "", "merge a custom Wappalyzer fingerprint JSON file")
 	flags.StringArrayVar(&opts.Categories, "category", nil, "include technologies in this category (repeatable)")
+	flags.IntVar(&opts.MinConfidence, "min-confidence", 1, "minimum detection confidence from 1 to 100")
+	flags.BoolVar(&opts.Explain, "explain", false, "show detection evidence in text output")
+
+	flags.BoolVar(&opts.Deep, "deep", false, "inspect up to 5 pages and their scripts and styles")
+	flags.IntVar(&opts.CrawlPages, "crawl", 1, "maximum same-host HTML pages to inspect")
+	flags.BoolVar(&opts.FetchAssets, "fetch-assets", false, "inspect linked JavaScript and CSS files")
+	flags.IntVar(&opts.MaxAssets, "max-assets", 20, "maximum script and stylesheet requests per target")
+	flags.StringVar(&opts.AssetScope, "asset-scope", "same-origin", "asset scope: same-origin or all")
+
 	flags.BoolVar(&opts.FailOnError, "fail-on-error", true, "exit 1 if any target fails")
 
 	root.AddCommand(newVersionCommand(ioStreams.out))
@@ -152,6 +167,17 @@ func runScan(ctx context.Context, command *cobra.Command, args []string, opts op
 	}
 	if err := validateOutputOptions(opts); err != nil {
 		return err
+	}
+	if err := validateCategories(opts.Categories); err != nil {
+		return err
+	}
+	if opts.Deep {
+		if !command.Flags().Changed("crawl") {
+			opts.CrawlPages = 5
+		}
+		if !command.Flags().Changed("fetch-assets") {
+			opts.FetchAssets = true
+		}
 	}
 
 	maxBodyBytes, err := parseByteSize(opts.MaxBody)
@@ -187,6 +213,11 @@ func runScan(ctx context.Context, command *cobra.Command, args []string, opts op
 		Scheme:          opts.Scheme,
 		FingerprintFile: opts.FingerprintFile,
 		Categories:      opts.Categories,
+		CrawlPages:      opts.CrawlPages,
+		FetchAssets:     opts.FetchAssets,
+		MaxAssets:       opts.MaxAssets,
+		AssetScope:      opts.AssetScope,
+		MinConfidence:   opts.MinConfidence,
 	})
 	if err != nil {
 		return err
@@ -196,9 +227,10 @@ func runScan(ctx context.Context, command *cobra.Command, args []string, opts op
 	results := engine.Scan(ctx, targets)
 	color := opts.Color == "always" || (opts.Color == "auto" && opts.Output == "" && isTerminalWriter(ioStreams.out))
 	if err := writeResults(opts.Output, ioStreams.out, results, report.Options{
-		Format: opts.Format,
-		Quiet:  opts.Quiet,
-		Color:  color,
+		Format:  opts.Format,
+		Quiet:   opts.Quiet,
+		Color:   color,
+		Explain: opts.Explain,
 	}); err != nil {
 		return fmt.Errorf("write output: %w", err)
 	}
@@ -269,6 +301,26 @@ func validateOutputOptions(opts options) error {
 	}
 	if opts.Output == "-" {
 		opts.Output = ""
+	}
+	return nil
+}
+
+func validateCategories(filters []string) error {
+	if len(filters) == 0 {
+		return nil
+	}
+	known := make(map[string]struct{})
+	for _, category := range wappalyzer.GetCategoriesMapping() {
+		known[strings.ToLower(category.Name)] = struct{}{}
+	}
+	for _, filter := range filters {
+		name := strings.TrimSpace(filter)
+		if name == "" {
+			return fmt.Errorf("category cannot be empty")
+		}
+		if _, exists := known[strings.ToLower(name)]; !exists {
+			return fmt.Errorf("unknown category %q; run 'wappy categories' to list valid names", filter)
+		}
 	}
 	return nil
 }

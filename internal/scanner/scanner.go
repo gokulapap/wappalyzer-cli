@@ -9,7 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,11 +20,10 @@ import (
 )
 
 type Scanner struct {
-	config          Config
-	client          *http.Client
-	detector        *wappalyzer.Wappalyze
-	technologyNames map[string]struct{}
-	limiter         *rateLimiter
+	config   Config
+	client   *http.Client
+	enhanced *enhancedDetector
+	limiter  *rateLimiter
 }
 
 func New(config Config) (*Scanner, error) {
@@ -83,17 +82,11 @@ func New(config Config) (*Scanner, error) {
 		return nil
 	}
 
-	technologyNames := make(map[string]struct{}, len(detector.GetFingerprints().Apps))
-	for name := range detector.GetFingerprints().Apps {
-		technologyNames[name] = struct{}{}
-	}
-
 	return &Scanner{
-		config:          config,
-		client:          client,
-		detector:        detector,
-		technologyNames: technologyNames,
-		limiter:         newRateLimiter(config.RatePerSecond),
+		config:   config,
+		client:   client,
+		enhanced: newEnhancedDetector(detector.GetFingerprints()),
+		limiter:  newRateLimiter(config.RatePerSecond),
 	}, nil
 }
 
@@ -155,7 +148,95 @@ func (s *Scanner) scanTarget(ctx context.Context, target Target) Result {
 			result.TLSVersion = tlsVersionName(response.TLS.Version)
 		}
 		result.Title = findTitle(body)
-		result.Technologies = s.detect(response.Header, body)
+
+		technologies := newTechnologySet(s.enhanced)
+		firstURL := response.Request.URL.String()
+		origin, _ := url.Parse(firstURL)
+		visitedPages := map[string]struct{}{canonicalURL(firstURL): {}}
+		queuedPages := make(map[string]struct{})
+		var pageQueue []string
+		var assets []resource
+		seenAssets := make(map[string]struct{})
+
+		inspectPage := func(pageURL string, headers http.Header, pageBody []byte) {
+			result.PagesScanned++
+			technologies.AddAll(s.enhanced.AnalyzeResponse(headers, pageBody, pageURL))
+			if !looksLikeHTML(headers.Get("Content-Type"), pageBody) {
+				return
+			}
+			analysis, analysisErr := s.enhanced.AnalyzeDocument(pageBody, pageURL)
+			if analysisErr != nil {
+				result.PartialErrors = append(result.PartialErrors, fmt.Sprintf("%s: %v", pageURL, analysisErr))
+				return
+			}
+			technologies.AddAll(analysis.Signals)
+			for _, link := range analysis.Links {
+				if !sameHost(origin, link) || !safeCrawlURL(link) {
+					continue
+				}
+				key := canonicalURL(link)
+				if _, visited := visitedPages[key]; visited {
+					continue
+				}
+				if _, queued := queuedPages[key]; queued {
+					continue
+				}
+				queuedPages[key] = struct{}{}
+				pageQueue = append(pageQueue, link)
+			}
+			for _, asset := range analysis.Resources {
+				if s.config.AssetScope == "same-origin" && !sameHost(origin, asset.URL) {
+					continue
+				}
+				key := asset.Kind + "\x00" + canonicalURL(asset.URL)
+				if _, seen := seenAssets[key]; seen {
+					continue
+				}
+				seenAssets[key] = struct{}{}
+				assets = append(assets, asset)
+			}
+		}
+
+		inspectPage(firstURL, response.Header, body)
+		for result.PagesScanned < s.config.CrawlPages && len(pageQueue) > 0 && ctx.Err() == nil {
+			pageURL := pageQueue[0]
+			pageQueue = pageQueue[1:]
+			delete(queuedPages, canonicalURL(pageURL))
+			visitedPages[canonicalURL(pageURL)] = struct{}{}
+			pageResponse, pageBody, _, pageErr := s.fetch(ctx, pageURL)
+			if pageErr != nil {
+				result.PartialErrors = append(result.PartialErrors, fmt.Sprintf("crawl %s: %v", pageURL, pageErr))
+				continue
+			}
+			resolvedPageURL := pageResponse.Request.URL.String()
+			if !sameHost(origin, resolvedPageURL) {
+				result.PartialErrors = append(result.PartialErrors, fmt.Sprintf("crawl %s: redirected outside target host", pageURL))
+				continue
+			}
+			inspectPage(resolvedPageURL, pageResponse.Header, pageBody)
+		}
+
+		if s.config.FetchAssets {
+			for _, asset := range assets {
+				if result.AssetsScanned >= s.config.MaxAssets || ctx.Err() != nil {
+					break
+				}
+				assetResponse, assetBody, _, assetErr := s.fetch(ctx, asset.URL)
+				if assetErr != nil {
+					result.PartialErrors = append(result.PartialErrors, fmt.Sprintf("asset %s: %v", asset.URL, assetErr))
+					continue
+				}
+				if assetResponse.StatusCode < 200 || assetResponse.StatusCode >= 300 {
+					result.PartialErrors = append(result.PartialErrors, fmt.Sprintf("asset %s: HTTP %d", asset.URL, assetResponse.StatusCode))
+					continue
+				}
+				result.AssetsScanned++
+				technologies.AddAll(s.enhanced.AnalyzeAsset(assetBody, asset.Kind, assetResponse.Request.URL.String()))
+			}
+		}
+
+		technologies.AddImplications()
+		result.Technologies = technologies.Technologies(s.config.Categories, s.config.MinConfidence)
 		result.DurationMS = time.Since(started).Milliseconds()
 		return result
 	}
@@ -225,34 +306,6 @@ func (s *Scanner) fetch(ctx context.Context, targetURL string) (*http.Response, 
 	return nil, nil, false, errors.New("request failed after retries")
 }
 
-func (s *Scanner) detect(headers http.Header, body []byte) []Technology {
-	detected := s.detector.FingerprintWithInfo(headers, body)
-	technologies := make([]Technology, 0, len(detected))
-	for detectedName, info := range detected {
-		name, version := splitTechnologyVersion(detectedName, s.technologyNames)
-		categories := append([]string(nil), info.Categories...)
-		sort.Strings(categories)
-		if !matchesCategories(categories, s.config.Categories) {
-			continue
-		}
-		technologies = append(technologies, Technology{
-			Name:        name,
-			Version:     version,
-			Categories:  categories,
-			Description: info.Description,
-			Website:     info.Website,
-			CPE:         info.CPE,
-		})
-	}
-	sort.Slice(technologies, func(i, j int) bool {
-		if technologies[i].Name == technologies[j].Name {
-			return technologies[i].Version < technologies[j].Version
-		}
-		return technologies[i].Name < technologies[j].Name
-	})
-	return technologies
-}
-
 func validateConfig(config Config) error {
 	if config.Concurrency < 1 || config.Concurrency > 1000 {
 		return fmt.Errorf("concurrency must be between 1 and 1000")
@@ -278,20 +331,19 @@ func validateConfig(config Config) error {
 	if config.Scheme != "auto" && config.Scheme != "https" && config.Scheme != "http" {
 		return fmt.Errorf("scheme must be auto, https, or http")
 	}
+	if config.CrawlPages < 1 || config.CrawlPages > 50 {
+		return fmt.Errorf("crawl pages must be between 1 and 50")
+	}
+	if config.MaxAssets < 0 || config.MaxAssets > 500 {
+		return fmt.Errorf("max assets must be between 0 and 500")
+	}
+	if config.AssetScope != "same-origin" && config.AssetScope != "all" {
+		return fmt.Errorf("asset scope must be same-origin or all")
+	}
+	if config.MinConfidence < 1 || config.MinConfidence > 100 {
+		return fmt.Errorf("minimum confidence must be between 1 and 100")
+	}
 	return nil
-}
-
-func splitTechnologyVersion(value string, knownNames map[string]struct{}) (string, string) {
-	if _, known := knownNames[value]; known {
-		return value, ""
-	}
-	for separator := strings.LastIndex(value, ":"); separator >= 0; separator = strings.LastIndex(value[:separator], ":") {
-		name := value[:separator]
-		if _, known := knownNames[name]; known {
-			return name, value[separator+1:]
-		}
-	}
-	return value, ""
 }
 
 func matchesCategories(categories, filters []string) bool {
@@ -306,6 +358,62 @@ func matchesCategories(categories, filters []string) bool {
 		}
 	}
 	return false
+}
+
+func canonicalURL(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return value
+	}
+	parsed.Scheme = strings.ToLower(parsed.Scheme)
+	parsed.Host = strings.ToLower(parsed.Host)
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func sameHost(origin *url.URL, candidate string) bool {
+	if origin == nil {
+		return false
+	}
+	parsed, err := url.Parse(candidate)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(origin.Host, parsed.Host)
+}
+
+func safeCrawlURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return false
+	}
+	lower := strings.ToLower(parsed.EscapedPath() + "?" + parsed.RawQuery)
+	for _, unsafeTerm := range []string{
+		"logout", "log-out", "signout", "sign-out", "delete", "remove", "destroy", "revoke",
+		"reset", "deactivate", "disable", "terminate", "cancel", "purge", "unsubscribe",
+	} {
+		if strings.Contains(lower, unsafeTerm) {
+			return false
+		}
+	}
+	switch strings.ToLower(path.Ext(parsed.Path)) {
+	case ".7z", ".avi", ".dmg", ".doc", ".docx", ".exe", ".gif", ".gz", ".ico", ".jpeg", ".jpg",
+		".mov", ".mp3", ".mp4", ".pdf", ".png", ".ppt", ".pptx", ".rar", ".svg", ".tar", ".tgz",
+		".webm", ".webp", ".xls", ".xlsx", ".zip":
+		return false
+	default:
+		return true
+	}
+}
+
+func looksLikeHTML(contentType string, body []byte) bool {
+	lowerContentType := strings.ToLower(contentType)
+	if strings.Contains(lowerContentType, "text/html") || strings.Contains(lowerContentType, "application/xhtml+xml") {
+		return true
+	}
+	trimmed := strings.TrimSpace(string(body[:min(len(body), 512)]))
+	trimmed = strings.ToLower(trimmed)
+	return strings.HasPrefix(trimmed, "<!doctype html") || strings.HasPrefix(trimmed, "<html") || strings.HasPrefix(trimmed, "<head")
 }
 
 func retryableStatus(status int) bool {

@@ -13,12 +13,13 @@ import (
 	"github.com/gokulapap/wappalyzer-cli/internal/scanner"
 )
 
-const SchemaVersion = "1"
+const SchemaVersion = "2"
 
 type Options struct {
-	Format string
-	Quiet  bool
-	Color  bool
+	Format  string
+	Quiet   bool
+	Color   bool
+	Explain bool
 }
 
 type Summary struct {
@@ -26,6 +27,8 @@ type Summary struct {
 	Succeeded    int `json:"succeeded"`
 	Failed       int `json:"failed"`
 	Technologies int `json:"technologies"`
+	Pages        int `json:"pages"`
+	Assets       int `json:"assets"`
 }
 
 type Document struct {
@@ -60,6 +63,8 @@ func BuildSummary(results []scanner.Result) Summary {
 			summary.Failed++
 		}
 		summary.Technologies += len(result.Technologies)
+		summary.Pages += result.PagesScanned
+		summary.Assets += result.AssetsScanned
 	}
 	return summary
 }
@@ -94,6 +99,9 @@ func writeText(writer io.Writer, results []scanner.Result, options Options) erro
 		}
 
 		header := fmt.Sprintf("%s  [%d]  %d technologies  %dms", result.FinalURL, result.StatusCode, len(result.Technologies), result.DurationMS)
+		if result.PagesScanned > 1 || result.AssetsScanned > 0 {
+			header += fmt.Sprintf("  pages:%d assets:%d", result.PagesScanned, result.AssetsScanned)
+		}
 		if _, err := fmt.Fprintln(writer, colorize(options.Color, cyan, header)); err != nil {
 			return err
 		}
@@ -107,6 +115,11 @@ func writeText(writer io.Writer, results []scanner.Result, options Options) erro
 				return err
 			}
 		}
+		for _, partialError := range result.PartialErrors {
+			if _, err := fmt.Fprintf(writer, "  %s %s\n", colorize(options.Color, yellow, "warning"), partialError); err != nil {
+				return err
+			}
+		}
 		for _, technology := range result.Technologies {
 			name := technology.Name
 			if technology.Version != "" {
@@ -116,8 +129,24 @@ func writeText(writer io.Writer, results []scanner.Result, options Options) erro
 			if categories == "" {
 				categories = "Uncategorized"
 			}
-			if _, err := fmt.Fprintf(writer, "  %-28s %s\n", colorize(options.Color, green, name), categories); err != nil {
+			if _, err := fmt.Fprintf(writer, "  %-28s %3d%%  %s\n", colorize(options.Color, green, name), technology.Confidence, categories); err != nil {
 				return err
+			}
+			if options.Explain {
+				for _, evidence := range technology.Evidence {
+					detail := evidence.Value
+					if detail == "" {
+						detail = evidence.Type
+					} else {
+						detail = evidence.Type + ": " + detail
+					}
+					if evidence.URL != "" {
+						detail += " (" + evidence.URL + ")"
+					}
+					if _, err := fmt.Fprintf(writer, "    - %s\n", detail); err != nil {
+						return err
+					}
+				}
 			}
 		}
 	}
@@ -152,8 +181,8 @@ func writeJSONLines(writer io.Writer, results []scanner.Result) error {
 func writeCSV(writer io.Writer, results []scanner.Result) error {
 	csvWriter := csv.NewWriter(writer)
 	if err := csvWriter.Write([]string{
-		"input", "url", "final_url", "status_code", "title", "technology", "version",
-		"categories", "server", "content_type", "tls_version", "duration_ms", "error",
+		"input", "url", "final_url", "status_code", "title", "technology", "version", "confidence",
+		"categories", "evidence", "server", "content_type", "tls_version", "pages_scanned", "assets_scanned", "duration_ms", "error",
 	}); err != nil {
 		return err
 	}
@@ -172,10 +201,14 @@ func writeCSV(writer io.Writer, results []scanner.Result) error {
 				result.Title,
 				technology.Name,
 				technology.Version,
+				strconv.Itoa(technology.Confidence),
 				strings.Join(technology.Categories, ";"),
+				formatEvidence(technology.Evidence),
 				result.Server,
 				result.ContentType,
 				result.TLSVersion,
+				strconv.Itoa(result.PagesScanned),
+				strconv.Itoa(result.AssetsScanned),
 				strconv.FormatInt(result.DurationMS, 10),
 				result.Error,
 			}); err != nil {
@@ -185,6 +218,21 @@ func writeCSV(writer io.Writer, results []scanner.Result) error {
 	}
 	csvWriter.Flush()
 	return csvWriter.Error()
+}
+
+func formatEvidence(evidence []scanner.Evidence) string {
+	values := make([]string, 0, len(evidence))
+	for _, item := range evidence {
+		value := item.Type
+		if item.Value != "" {
+			value += ":" + item.Value
+		}
+		if item.URL != "" {
+			value += "@" + item.URL
+		}
+		values = append(values, value)
+	}
+	return strings.Join(values, " | ")
 }
 
 const (

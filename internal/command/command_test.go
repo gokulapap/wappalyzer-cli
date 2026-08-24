@@ -80,12 +80,54 @@ func TestExecuteJSONScan(t *testing.T) {
 
 func TestExecuteRejectsInvalidOptions(t *testing.T) {
 	t.Parallel()
-	var stdout, stderr bytes.Buffer
-	exitCode := Execute(context.Background(), []string{"example.com", "--format", "yaml"}, bytes.NewReader(nil), &stdout, &stderr)
-	if exitCode != 2 {
-		t.Fatalf("exit code = %d, want 2", exitCode)
+	for _, args := range [][]string{
+		{"example.com", "--format", "yaml"},
+		{"example.com", "--category", "not-a-real-category"},
+		{"example.com", "--min-confidence", "0"},
+	} {
+		var stdout, stderr bytes.Buffer
+		exitCode := Execute(context.Background(), args, bytes.NewReader(nil), &stdout, &stderr)
+		if exitCode != 2 {
+			t.Fatalf("Execute(%v) exit code = %d, want 2", args, exitCode)
+		}
+		if stderr.Len() == 0 {
+			t.Fatalf("Execute(%v) expected an error message", args)
+		}
 	}
-	if stderr.Len() == 0 {
-		t.Fatal("expected an error message")
+}
+
+func TestExecuteDeepScanShowsEvidence(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/details":
+			writer.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprint(writer, `<model-viewer></model-viewer>`)
+		case "/app.css":
+			writer.Header().Set("Content-Type", "text/css")
+			_, _ = fmt.Fprint(writer, `.ClickOnceInfoText { display: block; }`)
+		default:
+			writer.Header().Set("Content-Type", "text/html")
+			_, _ = fmt.Fprint(writer, `<a href="/details">details</a><link rel="stylesheet" href="/app.css">`)
+		}
+	}))
+	defer server.Close()
+
+	var stdout, stderr bytes.Buffer
+	exitCode := Execute(context.Background(), []string{
+		server.URL,
+		"--deep",
+		"--explain",
+		"--retries", "0",
+		"--color", "never",
+	}, bytes.NewReader(nil), &stdout, &stderr)
+	if exitCode != 0 {
+		t.Fatalf("exit code = %d, stderr=%q", exitCode, stderr.String())
+	}
+	output := stdout.String()
+	for _, expected := range []string{"<model-viewer>", "ClickOnce", "dom:", "stylesheet:", "pages:2 assets:1"} {
+		if !bytes.Contains(stdout.Bytes(), []byte(expected)) {
+			t.Fatalf("output does not contain %q:\n%s", expected, output)
+		}
 	}
 }
